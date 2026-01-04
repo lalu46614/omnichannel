@@ -15,7 +15,7 @@ router = APIRouter(prefix="/input", tags=["Input Gateway"])
 
 # TEXT
 @router.post("/text")
-async def input_text(text: str, channel: str = Form(...), user_id: Optional[UUID] = Form(None), session_id: Optional[UUID] = Form(None)):
+async def input_text(text: str = Form(...), channel: str = Form(...), user_id: Optional[UUID] = Form(None), session_id: Optional[UUID] = Form(None)):
     validate_text_payload(text)
 
     input_id = str(uuid4())

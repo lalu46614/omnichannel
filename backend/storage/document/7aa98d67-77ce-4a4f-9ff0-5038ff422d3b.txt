@@ -1,0 +1,13 @@
+   Artificial Intelligence Overview
+   
+   AI is the simulation of human intelligence by machines.
+   Machine Learning is a subset of AI.
+   Deep Learning uses neural networks.
+
+
+	
+
+
+
+
+
