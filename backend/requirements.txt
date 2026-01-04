@@ -1,0 +1,19 @@
+# API
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+pydantic==2.6.4
+python-multipart==0.0.9
+
+# Environment
+python-dotenv==1.0.1
+
+# LLM
+groq==1.0.0
+
+# Audio
+openai-whisper==20231117
+torch>=2.1.0
+
+# Document parsing
+pdfplumber==0.11.0
+python-docx==1.1.2
