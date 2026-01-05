@@ -2,15 +2,20 @@ import { useState } from 'react';
 import { TextInput } from './TextInput';
 import { AttachmentButton, FilePreview } from './AttachmentButton';
 import { AudioRecorder } from './AudioRecorder';
-import { submitText, submitAudio, submitDocument } from '../services/api';
+
 import { SendIcon } from './Icons';
-import type { InputType } from '../types';
+import { submitUnified } from '../services/api';
 
 interface UnifiedInputProps {
   channel: string;
   user_id?: string;
   session_id?: string;
-  onResponse?: (response: { input_id: string; llm_response: string }) => void;
+  onResponse?: (response: { 
+    input_id: string; 
+    clusters: any[];
+    responses: any[];
+    total_clusters: number;
+  }) => void;
   onError?: (error: string) => void;
 }
 
@@ -26,9 +31,10 @@ export const UnifiedInput = ({
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Remove the clearing logic - allow all inputs to coexist
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
-    setAudioBlob(null);
+    // Don't clear audio - allow both to exist
   };
 
   const handleFileRemove = () => {
@@ -37,7 +43,7 @@ export const UnifiedInput = ({
 
   const handleAudioComplete = (blob: Blob) => {
     setAudioBlob(blob);
-    setSelectedFile(null);
+    // Don't clear file - allow both to exist
   };
 
   const handleAudioCancel = () => {
@@ -46,62 +52,43 @@ export const UnifiedInput = ({
 
   const handleSubmit = async () => {
     if (isSubmitting) return;
-
-    // Determine submission type based on available inputs
-    let type: InputType | null = null;
-    
-    if (audioBlob) {
-      type = 'audio';
-    } else if (selectedFile) {
-      type = 'document';
-    } else if (text.trim()) {
-      type = 'text';
-    }
-
-    if (!type) {
+  
+    const hasText = text.trim().length > 0;
+    const hasFile = selectedFile !== null;
+    const hasAudio = audioBlob !== null;
+  
+    if (!hasText && !hasFile && !hasAudio) {
       onError?.('Please enter text, attach a file, or record audio');
       return;
     }
-
+  
     setIsSubmitting(true);
-
+  
     try {
-      let response;
-
-      if (type === 'text') {
-        response = await submitText({
-          channel,
-          text: text.trim(),
-          user_id,
-          session_id,
-        });
-      } else if (type === 'audio' && audioBlob) {
-        // Convert blob to File
-        const audioFile = new File([audioBlob], 'recording.webm', {
+      // Convert audio blob to file if needed
+      let audioFile: File | undefined;
+      if (hasAudio && audioBlob) {
+        audioFile = new File([audioBlob], 'recording.webm', {
           type: audioBlob.type || 'audio/webm',
         });
-        response = await submitAudio({
-          channel,
-          file: audioFile,
-          user_id,
-          session_id,
-        });
-      } else if (type === 'document' && selectedFile) {
-        response = await submitDocument({
-          channel,
-          file: selectedFile,
-          user_id,
-          session_id,
-        });
-      } else {
-        throw new Error('Invalid input type');
       }
-
+  
+      // Use unified endpoint instead of parallel calls
+      const response = await submitUnified({
+        channel,
+        text: hasText ? text.trim() : undefined,
+        audio: audioFile,
+        document: hasFile ? selectedFile : undefined,
+        user_id,
+        session_id,
+      });
+  
       // Reset form
       setText('');
       setSelectedFile(null);
       setAudioBlob(null);
-
+  
+      // Pass the full response with clusters
       onResponse?.(response);
     } catch (error) {
       console.error('Submission error:', error);

@@ -6,6 +6,42 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
 const api = axios.create({
   baseURL: API_BASE_URL,
 });
+export const submitUnified = async (params: {
+  channel: string;
+  text?: string;
+  audio?: File;
+  document?: File;
+  user_id?: string;
+  session_id?: string;
+}): Promise<{
+  input_id: string;
+  clusters: any[];
+  responses: any[];
+  total_clusters: number;
+}> => {
+  const formData = new FormData();
+  formData.append('channel', params.channel);
+  
+  if (params.text) {
+    formData.append('text', params.text);
+  }
+  if (params.audio) {
+    formData.append('audio', params.audio);
+  }
+  if (params.document) {
+    formData.append('document', params.document);
+  }
+  
+  if (params.user_id) {
+    formData.append('user_id', params.user_id);
+  }
+  if (params.session_id) {
+    formData.append('session_id', params.session_id);
+  }
+
+  const response = await api.post('/input/unified', formData);
+  return response.data;
+};
 
 export const submitText = async (params: SubmitTextParams): Promise<ApiResponse> => {
   const formData = new FormData();
