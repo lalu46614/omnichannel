@@ -16,8 +16,11 @@ export const submitUnified = async (params: {
 }): Promise<{
   input_id: string;
   clusters: any[];
-  responses: any[];
-  total_clusters: number;
+  responses?: any[];
+  total_clusters?: number;
+  needs_clarification?: boolean;
+  clarification_questions?: string[];
+  context_envelope?: any;
 }> => {
   const formData = new FormData();
   formData.append('channel', params.channel);

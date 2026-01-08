@@ -12,6 +12,9 @@ from storage.disk import save_file
 from normalisation.dispatcher import normalize_input
 from llm.groq_client import call_llm
 from semantic.clustering import InputItem, cluster_inputs_advanced
+from context.constructor import ContextEnvelopeConstructor
+from elicitation.resolver import ElicitationResolver
+from history.memory_store import history_store
 
 router = APIRouter(prefix="/input", tags=["Input Gateway"])
 @router.post("/unified")
@@ -29,9 +32,6 @@ async def input_unified(
 
     input_id = str(uuid4())
     metadata = add_metadata(channel=channel, user_id=user_id, session_id=session_id)
-
- 
-    input_items = []
 
     async def process_text():
         if not text:
@@ -66,25 +66,66 @@ async def input_unified(
         normalized_text = await normalize_input(gateway_output)
         return InputItem(input_type="document",normalized_text=normalized_text,original_data={"gateway_output": gateway_output})
 
+    # Execute processing FIRST
     results = await asyncio.gather(process_text(),
                                    process_audio(),
                                    process_document())
     
     input_items = [item for item in results if item is not None]
-    clusters = await cluster_inputs_advanced(input_items)
+
+    # Get previous clusters from history
+    previous_clusters = []
+    if session_id:
+        previous_clusters = history_store.get_clusters(str(session_id))
     
+    # Cluster with history awareness
+    from semantic.clustering import cluster_inputs_with_history
+    clusters = await cluster_inputs_with_history(input_items, previous_clusters)
+    
+    # Save clusters to history for next request
+    if session_id:
+        history_store.save_clusters(str(session_id), clusters)
+
+    # Check if clarification needed
+    elicitation = ElicitationResolver()
+    history_data = None
+    if session_id:
+        history_data = history_store.get_history(str(session_id))
+
+    resolved_clusters, _, _, needs_clarification, questions = await elicitation.analyze_and_resolve(
+        input_items=input_items,
+        clusters=clusters,
+        conversation_history=history_data
+    )
+    
+    # If clarification needed, return questions
+    if needs_clarification:
+        return {
+            "input_id": input_id,
+            "needs_clarification": True,
+            "clarification_questions": questions,
+            "clusters": resolved_clusters
+        }
+
+    constructor = ContextEnvelopeConstructor()
+
+    context_envelope = await constructor.construct_envelope(input_items=input_items,clusters=resolved_clusters,metadata=metadata,input_id=input_id)
     all_responses = []
 
-    for cluster in clusters:
-        cluster_texts = [
-            item.normalized_text 
-            for item in input_items 
-            if any(
-                item.input_type == cluster_item['input_type'] 
-                for cluster_item in cluster['items']
-            )
-        ]
-        combined_text = "\n\n".join(cluster_texts)
+    for cluster in resolved_clusters:
+        # Extract text directly from cluster items (includes previous requests)
+        cluster_texts = []
+        for cluster_item in cluster.get('items', []):
+            if 'text_preview' in cluster_item:
+                cluster_texts.append(cluster_item['text_preview'])
+            elif 'original_data' in cluster_item and 'gateway_output' in cluster_item['original_data']:
+                gw_output = cluster_item['original_data']['gateway_output']
+                if 'raw_text' in gw_output:
+                    cluster_texts.append(gw_output['raw_text'])
+        
+        combined_text = "\n\n".join(cluster_texts) if cluster_texts else ""
+        
+        llm_response = await call_llm(combined_text)
         
         llm_response = await call_llm(combined_text)
         
@@ -94,11 +135,37 @@ async def input_unified(
             "item_count": cluster['item_count'],
             "llm_response": llm_response
         })
+    if session_id:
+        # Store input
+        history_store.add_input(
+            str(session_id),
+            {
+                "input_id": input_id,
+                "text": text if text else None,
+                "has_audio": audio is not None,
+                "has_document": document is not None,
+                "channel": channel,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+        # Store response (if not clarification needed)
+        if not needs_clarification:
+            history_store.add_response(
+                str(session_id),
+                {
+                    "input_id": input_id,
+                    "clusters": len(resolved_clusters),
+                    "responses_count": len(all_responses) if 'all_responses' in locals() else 0,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
     return {
         "input_id": input_id,
-        "clusters": clusters,  # Metadata about clusters
+        "clusters": resolved_clusters,  # Metadata about clusters
         "responses": all_responses,  # LLM responses per cluster
-        "total_clusters": len(clusters)
+        "total_clusters": len(resolved_clusters),
+        "context_envelope": context_envelope.model_dump()  # Serialize Pydantic model to dict
     }
 
     

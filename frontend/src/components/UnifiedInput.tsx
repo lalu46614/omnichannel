@@ -6,16 +6,13 @@ import { AudioRecorder } from './AudioRecorder';
 import { SendIcon } from './Icons';
 import { submitUnified } from '../services/api';
 
+
+
 interface UnifiedInputProps {
   channel: string;
   user_id?: string;
   session_id?: string;
-  onResponse?: (response: { 
-    input_id: string; 
-    clusters: any[];
-    responses: any[];
-    total_clusters: number;
-  }) => void;
+  onResponse?: (response: any) => void;
   onError?: (error: string) => void;
 }
 
@@ -148,6 +145,7 @@ export const UnifiedInput = ({
           onRecordingComplete={handleAudioComplete}
           onRecordingCancel={handleAudioCancel}
         />
+                
         {showSendButton && (
           <button
             type="button"

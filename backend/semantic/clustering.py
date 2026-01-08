@@ -101,3 +101,96 @@ async def cluster_inputs_advanced(inputs: List[InputItem], threshold: float = 0.
         })
     
     return result
+
+
+async def cluster_inputs_with_history(
+    inputs: List[InputItem], 
+    previous_clusters: List[Dict] = None,
+    threshold: float = 0.4
+) -> List[Dict]:
+    """
+    Cluster inputs, comparing against previous clusters from session history.
+    Appends to existing clusters if similar, creates new ones if not.
+    """
+    
+    if not inputs:
+        return previous_clusters or []
+    
+    # If no previous clusters, use standard clustering
+    if not previous_clusters:
+        return await cluster_inputs_advanced(inputs, threshold)
+    
+    # Get embeddings for new inputs
+    new_texts = [item.normalized_text for item in inputs]
+    new_embeddings = await get_embeddings(new_texts)
+    
+    # Get embeddings for existing clusters (use representative text)
+    existing_cluster_texts = []
+    existing_cluster_embeddings = []
+    
+    for cluster in previous_clusters:
+        # Get representative text from cluster (first item or combined)
+        cluster_text = " ".join([
+            item.get('text_preview', '') 
+            for item in cluster.get('items', [])
+        ])
+        existing_cluster_texts.append(cluster_text)
+    
+    if existing_cluster_texts:
+        existing_cluster_embeddings = await get_embeddings(existing_cluster_texts)
+    
+    # Track which new inputs have been assigned
+    assigned = [False] * len(inputs)
+    updated_clusters = []
+    
+    # Try to match new inputs to existing clusters
+    for cluster_idx, cluster in enumerate(previous_clusters):
+        # Get cluster embedding if available
+        cluster_embedding = None
+        if existing_cluster_embeddings is not None and len(existing_cluster_embeddings) > cluster_idx:
+            cluster_embedding = existing_cluster_embeddings[cluster_idx]
+        
+        # Find new inputs similar to this cluster
+        matched_items = []
+        for i, (item, new_emb) in enumerate(zip(inputs, new_embeddings)):
+            if assigned[i]:
+                continue
+            
+            if cluster_embedding is not None:
+                similarity = cosine_similarity(new_emb, cluster_embedding)
+                if similarity >= threshold:
+                    matched_items.append((i, item))
+                    assigned[i] = True
+        
+        # If matches found, append to existing cluster
+        if matched_items:
+            # Update cluster with new items
+            updated_cluster = cluster.copy()
+            for idx, item in matched_items:
+                updated_cluster['items'].append({
+                    'input_type': item.input_type,
+                    'text_preview': item.normalized_text[:100] + '...' if len(item.normalized_text) > 100 else item.normalized_text,
+                    'original_data': item.original_data
+                })
+            updated_cluster['item_count'] = len(updated_cluster['items'])
+            updated_cluster['input_types'] = list(set(
+                item.get('input_type') for item in updated_cluster['items']
+            ))
+            updated_clusters.append(updated_cluster)
+        else:
+            # No matches, keep existing cluster as is
+            updated_clusters.append(cluster)
+    
+    # Create new clusters for unassigned inputs
+    unassigned_items = [inputs[i] for i in range(len(inputs)) if not assigned[i]]
+    if unassigned_items:
+        # Cluster unassigned items together
+        new_clusters = await cluster_inputs_advanced(unassigned_items, threshold)
+        # Assign new bucket IDs (continue from previous)
+        max_bucket_id = max([c.get('bucket_id', -1) for c in previous_clusters], default=-1)
+        for cluster in new_clusters:
+            cluster['bucket_id'] = max_bucket_id + 1
+            max_bucket_id += 1
+        updated_clusters.extend(new_clusters)
+    
+    return updated_clusters
