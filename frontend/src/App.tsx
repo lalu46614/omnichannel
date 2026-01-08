@@ -40,6 +40,8 @@ function App() {
   };  
   const handleChunkProcessed = (response: any) => {
     console.log('Chunk processed:', response);
+    setLastResponse(response);
+    setError(null);
   };
 
   return (
@@ -183,8 +185,6 @@ function App() {
                           <summary>View Details</summary>
                           <div style={{ marginTop: '10px' }}>
                             <p><strong>Complexity:</strong> {lastResponse.context_envelope.estimated_complexity}</p>
-                            <p><strong>Urgency:</strong> {lastResponse.context_envelope.urgency}</p>
-                            <p><strong>Requires Tools:</strong> {lastResponse.context_envelope.requires_tools ? 'Yes' : 'No'}</p>
                             
                             {/* Conversation History */}
                             {lastResponse.context_envelope.conversation_history && (

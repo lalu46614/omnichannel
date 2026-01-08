@@ -43,8 +43,6 @@ class ContextEnvelope(BaseModel):
     cluster_relationships: Dict[str, Any] = {}  # How clusters relate to each other
     
     # Contextual metadata
-    urgency: str = "normal"  # normal, high, low
-    requires_tools: bool = False
     estimated_complexity: str = "medium"  # simple, medium, complex
     
     # For explainability
