@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { MicrophoneIcon } from './Icons';
 import { submitUnified } from '../services/api';
+import { sileroVAD } from '../services/sileroVAD';
 
 interface VoiceModeProps {
   channel: string;
@@ -10,14 +11,17 @@ interface VoiceModeProps {
   onError?: (error: string) => void;
 }
 
-// Configuration constants
+// Configuration
 const VAD_CONFIG = {
-  SILENCE_THRESHOLD: 15,        // Amplitude threshold (0-128 range)
-  SILENCE_DURATION: 2000,       // 2 seconds of silence to trigger chunk
-  MIN_CHUNK_DURATION: 1000,     // Minimum 1 second before sending (filters noise)
-  FFT_SIZE: 2048,                // Audio analysis resolution
-  SMOOTHING: 0.3,                // VAD responsiveness
-  TIMESLICE: 100,                // MediaRecorder chunk interval (ms)
+  SILENCE_THRESHOLD: 15,        // Energy-based fallback threshold
+  SILENCE_DURATION: 4000,      // Wait 4s of silence before stopping
+  MIN_CHUNK_DURATION: 3000,    // Minimum 2s recording (filters noise)
+  FFT_SIZE: 2048,
+  SMOOTHING: 0.3,
+  USE_SILERO: true,
+  TIMESLICE: 100,              // MediaRecorder chunk interval (ms)
+  VAD_CHECK_INTERVAL: 100,     // Check VAD every 100ms
+  RECORDING_COOLDOWN: 500,     // 500ms cooldown between recordings
 } as const;
 
 const BUTTON_STYLES = {
@@ -60,26 +64,32 @@ export const VoiceMode = ({
   onChunkProcessed,
   onError,
 }: VoiceModeProps) => {
-  // State
   const [isActive, setIsActive] = useState(false);
   const [isListening, setIsListening] = useState(false);
 
-  // Refs for audio resources
+  // Audio resources
   const streamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
 
-  // Refs for control flow
+  // Control state
   const isActiveRef = useRef(false);
   const isRecordingRef = useRef(false);
   const isProcessingRef = useRef(false);
   const recordingStartTimeRef = useRef<number | null>(null);
-  const silenceTimerRef = useRef<number | null>(null);
-  const vadAnimationFrameRef = useRef<number | null>(null);
   const chunkBufferRef = useRef<Blob[]>([]);
 
-  // Cleanup on unmount
+  // Timers
+  const silenceTimerRef = useRef<number | null>(null);
+  const vadAnimationFrameRef = useRef<number | null>(null);
+  const lastVadCheckRef = useRef<number>(0);
+  const lastRecordingStopRef = useRef<number>(0);
+
+  // Silero VAD
+  const sileroProcessorRef = useRef<((analyser: AnalyserNode) => Promise<boolean>) | null>(null);
+  const vadModelLoadedRef = useRef(false);
+
   useEffect(() => {
     return () => stopVoiceMode();
   }, []);
@@ -87,12 +97,16 @@ export const VoiceMode = ({
   // ==================== Recording Management ====================
 
   const startRecording = () => {
+    // Cooldown check
+    const now = Date.now();
+    if (now - lastRecordingStopRef.current < VAD_CONFIG.RECORDING_COOLDOWN) {
+      return;
+    }
+
     if (!streamRef.current || isRecordingRef.current) return;
 
     const mediaRecorder = new MediaRecorder(streamRef.current, {
-      mimeType: MediaRecorder.isTypeSupported('audio/webm') 
-        ? 'audio/webm' 
-        : 'audio/mp4',
+      mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4',
     });
 
     mediaRecorderRef.current = mediaRecorder;
@@ -120,6 +134,7 @@ export const VoiceMode = ({
   const stopRecording = () => {
     if (mediaRecorderRef.current?.state === 'recording') {
       mediaRecorderRef.current.stop();
+      lastRecordingStopRef.current = Date.now();
     }
   };
 
@@ -139,19 +154,39 @@ export const VoiceMode = ({
     return maxAmplitude;
   };
 
+  const detectVoice = async (analyser: AnalyserNode): Promise<boolean> => {
+    if (VAD_CONFIG.USE_SILERO && vadModelLoadedRef.current && sileroProcessorRef.current) {
+      try {
+        return await sileroProcessorRef.current(analyser);
+      } catch (error) {
+        console.error('Silero VAD error, using fallback:', error);
+      }
+    }
+    
+    // Fallback to energy-based detection
+    const voiceLevel = calculateVoiceLevel(analyser);
+    return voiceLevel > VAD_CONFIG.SILENCE_THRESHOLD;
+  };
+
   const monitorVoiceActivity = () => {
     if (!analyserRef.current) return;
 
-    const analyser = analyserRef.current;
-    
-    const checkVoice = () => {
+    const checkVoice = async () => {
       if (!isActiveRef.current || !analyserRef.current) {
         vadAnimationFrameRef.current = null;
         return;
       }
 
-      const voiceLevel = calculateVoiceLevel(analyser);
-      const hasVoice = voiceLevel > VAD_CONFIG.SILENCE_THRESHOLD;
+      // Throttle VAD checks
+      const now = Date.now();
+      if (now - lastVadCheckRef.current < VAD_CONFIG.VAD_CHECK_INTERVAL) {
+        vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
+        return;
+      }
+      lastVadCheckRef.current = now;
+
+      // Detect voice
+      const hasVoice = await detectVoice(analyserRef.current);
 
       if (hasVoice) {
         setIsListening(true);
@@ -160,6 +195,7 @@ export const VoiceMode = ({
           startRecording();
         }
         
+        // Clear silence timer
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = null;
@@ -167,6 +203,7 @@ export const VoiceMode = ({
       } else {
         setIsListening(false);
         
+        // Start silence timer if recording
         if (isRecordingRef.current && !silenceTimerRef.current) {
           silenceTimerRef.current = window.setTimeout(() => {
             stopRecording();
@@ -190,30 +227,22 @@ export const VoiceMode = ({
     const chunks = [...chunkBufferRef.current];
     chunkBufferRef.current = [];
 
-    if (chunks.length === 0) {
-      isProcessingRef.current = false;
-      return;
-    }
-
-    const audioBlob = new Blob(chunks, { 
-      type: mediaRecorderRef.current?.mimeType || 'audio/webm' 
-    });
-
-    // Calculate actual recording duration
-    const actualDuration = recordingStartTimeRef.current 
+    // Check minimum duration
+    const duration = recordingStartTimeRef.current 
       ? Date.now() - recordingStartTimeRef.current 
       : 0;
 
-    // Filter out noise/short utterances
-    if (actualDuration < VAD_CONFIG.MIN_CHUNK_DURATION) {
+    if (duration < VAD_CONFIG.MIN_CHUNK_DURATION) {
       isProcessingRef.current = false;
-      if (isActiveRef.current) {
-        startRecording();
-      }
+      if (isActiveRef.current) startRecording();
       return;
     }
 
     try {
+      const audioBlob = new Blob(chunks, { 
+        type: mediaRecorderRef.current?.mimeType || 'audio/webm' 
+      });
+
       const audioFile = new File([audioBlob], `chunk_${Date.now()}.webm`, {
         type: audioBlob.type || 'audio/webm',
       });
@@ -246,9 +275,11 @@ export const VoiceMode = ({
 
   const startVoiceMode = async () => {
     try {
+      // Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
+      // Setup audio context and analyser
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioContextRef.current = audioContext;
       
@@ -259,14 +290,28 @@ export const VoiceMode = ({
       source.connect(analyser);
       analyserRef.current = analyser;
 
+      // Load Silero VAD if enabled
+      if (VAD_CONFIG.USE_SILERO) {
+        try {
+          await sileroVAD.loadModel();
+          sileroProcessorRef.current = sileroVAD.createStreamProcessor(audioContext, source);
+          vadModelLoadedRef.current = true;
+          console.log('Silero VAD ready');
+        } catch (error) {
+          console.error('Silero VAD failed, using fallback:', error);
+          vadModelLoadedRef.current = false;
+          onError?.('VAD model failed, using basic detection');
+        }
+      }
+
+      // Start monitoring
       isActiveRef.current = true;
       setIsActive(true);
       setIsListening(false);
-
       monitorVoiceActivity();
     } catch (error) {
-      console.error('Error starting voice mode:', error);
-      onError?.('Failed to access microphone. Please check your permissions.');
+      console.error('Failed to start voice mode:', error);
+      onError?.('Failed to access microphone. Please check permissions.');
       isActiveRef.current = false;
       setIsActive(false);
     }
@@ -297,7 +342,6 @@ export const VoiceMode = ({
     // Cleanup resources
     streamRef.current?.getTracks().forEach(track => track.stop());
     streamRef.current = null;
-
     audioContextRef.current?.close();
     audioContextRef.current = null;
 

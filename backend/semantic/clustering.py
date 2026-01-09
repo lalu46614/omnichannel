@@ -79,12 +79,6 @@ async def cluster_inputs_advanced(inputs: List[InputItem], threshold: float = 0.
     
     result = []
     for idx, cluster in enumerate(clusters):
-        # Get representative text (first item or most central)
-        cluster_texts = [item.normalized_text for item in cluster]
-        cluster_embeddings = await get_embeddings(cluster_texts)
-        
-        # Calculate average embedding for cluster summary
-        avg_embedding = np.mean(cluster_embeddings, axis=0)
         
         result.append({
             'bucket_id': idx,

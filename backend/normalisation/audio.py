@@ -9,7 +9,7 @@ def get_whisper_model():
     global _model
     if _model is None:
         print("Loading Whisper model (first time only, this may take a minute)...")
-        _model = whisper.load_model("base")
+        _model = whisper.load_model("tiny")
         print("Whisper model loaded!")
     return _model
 

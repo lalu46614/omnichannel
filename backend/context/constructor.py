@@ -180,7 +180,8 @@ class ContextEnvelopeConstructor:
     async def _analyze_cluster_relationships(
         self,
         cluster_envelopes: List[ClusterEnvelope],
-        reasoning_trace: List[str]
+        reasoning_trace: List[str],
+        existing_embeddings: Optional[List[List[float]]] = None
     ) -> Dict[str, Any]:
         """Analyze how clusters relate to each other semantically."""
         
@@ -188,7 +189,12 @@ class ContextEnvelopeConstructor:
             return {"relationship_type": "single_cluster"}
         
         cluster_texts = [env.normalized_text for env in cluster_envelopes]
-        embeddings = await get_embeddings(cluster_texts)
+        
+        # Reuse embeddings if provided, otherwise generate
+        if existing_embeddings:
+            embeddings = existing_embeddings
+        else:
+            embeddings = await get_embeddings(cluster_texts)
         
         relationships = self._calculate_pairwise_similarities(
             cluster_envelopes, embeddings

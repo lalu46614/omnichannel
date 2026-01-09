@@ -125,9 +125,7 @@ async def input_unified(
         
         combined_text = "\n\n".join(cluster_texts) if cluster_texts else ""
         
-        llm_response = await call_llm(combined_text)
-        
-        llm_response = await call_llm(combined_text)
+        llm_response = await call_llm(combined_text,context_envelope.model_dump())
         
         all_responses.append({
             "bucket_id": cluster['bucket_id'],
