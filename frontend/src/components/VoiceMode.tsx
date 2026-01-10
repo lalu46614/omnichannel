@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { MicrophoneIcon } from './Icons';
 import { submitUnified } from '../services/api';
-import { sileroVAD } from '../services/sileroVAD';
+import { createDefaultVAD, VADEngineType, BaseVADEngine } from '../modules/vad';
+import { AudioManager } from '../modules/audio';
 
 interface VoiceModeProps {
   channel: string;
@@ -11,17 +12,13 @@ interface VoiceModeProps {
   onError?: (error: string) => void;
 }
 
-// Configuration
-const VAD_CONFIG = {
-  SILENCE_THRESHOLD: 15,        // Energy-based fallback threshold
-  SILENCE_DURATION: 4000,      // Wait 4s of silence before stopping
-  MIN_CHUNK_DURATION: 3000,    // Minimum 2s recording (filters noise)
-  FFT_SIZE: 2048,
-  SMOOTHING: 0.3,
-  USE_SILERO: true,
-  TIMESLICE: 100,              // MediaRecorder chunk interval (ms)
+// Configuration - Fixed values
+const VOICE_CONFIG = {
+  SILENCE_DURATION: 3500,      // 3.5 seconds - allow for natural speech pauses (was 2000ms)
+  MIN_CHUNK_DURATION: 3000,    // Minimum 1s recording (filters noise, was 3000ms)
   VAD_CHECK_INTERVAL: 100,     // Check VAD every 100ms
   RECORDING_COOLDOWN: 500,     // 500ms cooldown between recordings
+  RESUME_WINDOW: 3000,         // 3s window to resume recording after silence
 } as const;
 
 const BUTTON_STYLES = {
@@ -67,28 +64,23 @@ export const VoiceMode = ({
   const [isActive, setIsActive] = useState(false);
   const [isListening, setIsListening] = useState(false);
 
-  // Audio resources
-  const streamRef = useRef<MediaStream | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
+  // Modules
+  const vadRef = useRef<BaseVADEngine | null>(null);
+  const audioManagerRef = useRef<AudioManager | null>(null);
+  const vadProcessorRef = useRef<((analyser: AnalyserNode) => Promise<boolean>) | null>(null);
 
   // Control state
   const isActiveRef = useRef(false);
-  const isRecordingRef = useRef(false);
-  const isProcessingRef = useRef(false);
-  const recordingStartTimeRef = useRef<number | null>(null);
-  const chunkBufferRef = useRef<Blob[]>([]);
-
-  // Timers
   const silenceTimerRef = useRef<number | null>(null);
   const vadAnimationFrameRef = useRef<number | null>(null);
   const lastVadCheckRef = useRef<number>(0);
   const lastRecordingStopRef = useRef<number>(0);
 
-  // Silero VAD
-  const sileroProcessorRef = useRef<((analyser: AnalyserNode) => Promise<boolean>) | null>(null);
-  const vadModelLoadedRef = useRef(false);
+  const pendingChunkRef = useRef<Blob | null>(null);
+  const pendingChunkTimestampRef = useRef<number | null>(null);
+  const pendingChunkDurationRef = useRef<number | null>(null);
+  const resumeWindowTimerRef = useRef<number | null>(null);
+  const consecutiveSilenceCountRef = useRef<number>(0);
 
   useEffect(() => {
     return () => stopVoiceMode();
@@ -97,155 +89,198 @@ export const VoiceMode = ({
   // ==================== Recording Management ====================
 
   const startRecording = () => {
+    const audioManager = audioManagerRef.current;
+    if (!audioManager) return;
+
     // Cooldown check
     const now = Date.now();
-    if (now - lastRecordingStopRef.current < VAD_CONFIG.RECORDING_COOLDOWN) {
+    if (now - lastRecordingStopRef.current < VOICE_CONFIG.RECORDING_COOLDOWN) {
       return;
     }
 
-    if (!streamRef.current || isRecordingRef.current) return;
+    // Don't start if already recording or processing
+    if (audioManager.isRecording() || audioManager.isProcessing()) {
+      return;
+    }
 
-    const mediaRecorder = new MediaRecorder(streamRef.current, {
-      mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4',
-    });
+    // CRITICAL FIX: Reset VAD state before starting new recording session
+    // This prevents false positives from previous session state
+    if (vadRef.current) {
+      vadRef.current.reset();
+    }
 
-    mediaRecorderRef.current = mediaRecorder;
-    chunkBufferRef.current = [];
-
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunkBufferRef.current.push(event.data);
+    audioManager.clearChunks();
+    audioManager.startRecording(
+      undefined, // onDataAvailable
+      () => {
+        // onStop callback - process the chunk
+        // Always process (even if stopping) to handle final chunk
+        processChunk(false);
       }
-    };
-
-    mediaRecorder.onstop = () => {
-      if (chunkBufferRef.current.length > 0 && isActiveRef.current) {
-        processChunk();
-      }
-      isRecordingRef.current = false;
-      recordingStartTimeRef.current = null;
-    };
-
-    mediaRecorder.start(VAD_CONFIG.TIMESLICE);
-    isRecordingRef.current = true;
-    recordingStartTimeRef.current = Date.now();
+    );
+    lastRecordingStopRef.current = 0; // Reset cooldown
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === 'recording') {
-      mediaRecorderRef.current.stop();
+    const audioManager = audioManagerRef.current;
+    if (!audioManager) return;
+
+    if (audioManager.isRecording()) {
+      audioManager.stopRecording();
       lastRecordingStopRef.current = Date.now();
     }
   };
 
   // ==================== Voice Activity Detection ====================
 
-  const calculateVoiceLevel = (analyser: AnalyserNode): number => {
-    const dataArray = new Uint8Array(analyser.fftSize);
-    analyser.getByteTimeDomainData(dataArray);
-    
-    let maxAmplitude = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-      const deviation = Math.abs(dataArray[i] - 128);
-      if (deviation > maxAmplitude) {
-        maxAmplitude = deviation;
-      }
+const monitorVoiceActivity = () => {
+  const audioManager = audioManagerRef.current;
+  const vadProcessor = vadProcessorRef.current;
+  
+  if (!audioManager || !vadProcessor) {
+    console.error('VoiceMode: Missing audioManager or vadProcessor');
+    return;
+  }
+
+  const checkVoice = async () => {
+    if (!isActiveRef.current) {
+      vadAnimationFrameRef.current = null;
+      return;
     }
-    return maxAmplitude;
-  };
 
-  const detectVoice = async (analyser: AnalyserNode): Promise<boolean> => {
-    if (VAD_CONFIG.USE_SILERO && vadModelLoadedRef.current && sileroProcessorRef.current) {
-      try {
-        return await sileroProcessorRef.current(analyser);
-      } catch (error) {
-        console.error('Silero VAD error, using fallback:', error);
-      }
+    // Throttle VAD checks
+    const now = Date.now();
+    if (now - lastVadCheckRef.current < VOICE_CONFIG.VAD_CHECK_INTERVAL) {
+      vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
+      return;
     }
-    
-    // Fallback to energy-based detection
-    const voiceLevel = calculateVoiceLevel(analyser);
-    return voiceLevel > VAD_CONFIG.SILENCE_THRESHOLD;
-  };
+    lastVadCheckRef.current = now;
 
-  const monitorVoiceActivity = () => {
-    if (!analyserRef.current) return;
-
-    const checkVoice = async () => {
-      if (!isActiveRef.current || !analyserRef.current) {
-        vadAnimationFrameRef.current = null;
-        return;
-      }
-
-      // Throttle VAD checks
-      const now = Date.now();
-      if (now - lastVadCheckRef.current < VAD_CONFIG.VAD_CHECK_INTERVAL) {
-        vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
-        return;
-      }
-      lastVadCheckRef.current = now;
-
-      // Detect voice
-      const hasVoice = await detectVoice(analyserRef.current);
+    try {
+      const analyser = audioManager.getAnalyser();
+      const hasVoice = await vadProcessor(analyser);
 
       if (hasVoice) {
         setIsListening(true);
         
-        if (!isRecordingRef.current) {
+        // Check if we should cancel pending chunk send (speech resumed)
+        if (pendingChunkRef.current && pendingChunkTimestampRef.current) {
+          const timeSinceLastChunk = Date.now() - pendingChunkTimestampRef.current;
+          if (timeSinceLastChunk < VOICE_CONFIG.RESUME_WINDOW) {
+            // User continued speaking - clear pending chunk and continue recording
+            console.log('Speech resumed, canceling pending chunk send');
+            pendingChunkRef.current = null;
+            pendingChunkTimestampRef.current = null;
+            pendingChunkDurationRef.current = null;
+            if (resumeWindowTimerRef.current) {
+              clearTimeout(resumeWindowTimerRef.current);
+              resumeWindowTimerRef.current = null;
+            }
+          }
+        }
+        
+        if (!audioManager.isRecording() && !audioManager.isProcessing()) {
           startRecording();
         }
         
-        // Clear silence timer
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = null;
         }
+        
+        // Reset consecutive silence counter when voice is detected
+        consecutiveSilenceCountRef.current = 0;
       } else {
         setIsListening(false);
         
-        // Start silence timer if recording
-        if (isRecordingRef.current && !silenceTimerRef.current) {
+        // CRITICAL FIX: If we have a pending chunk, we're in resume window - don't start new recordings
+        // Just wait to see if speech resumes to cancel the pending chunk
+        if (pendingChunkRef.current && pendingChunkTimestampRef.current) {
+          const timeSinceLastChunk = Date.now() - pendingChunkTimestampRef.current;
+          // Skip silence timer logic while in resume window - wait for voice or timer expiration
+          if (timeSinceLastChunk < VOICE_CONFIG.RESUME_WINDOW && !audioManager.isRecording()) {
+            // Still waiting in resume window - don't do anything yet
+            vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
+            return;
+          }
+        }
+        
+        // CRITICAL FIX: Require multiple consecutive silence detections before starting timer
+        // This prevents false positives during natural speech pauses
+        if (audioManager.isRecording() && !silenceTimerRef.current) {
+          consecutiveSilenceCountRef.current++;
+          const requiredConsecutiveSilence = 5; // Require 5 consecutive silence detections (~500ms) to reduce false positives
+          
+          if (consecutiveSilenceCountRef.current < requiredConsecutiveSilence) {
+            // Not enough consecutive silence - continue checking
+            vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
+            return;
+          }
+          
+          // Enough consecutive silence - start timer
+          consecutiveSilenceCountRef.current = 0; // Reset counter
           silenceTimerRef.current = window.setTimeout(() => {
+            // Save chunks to pending before stopping
+            const chunks = audioManager.getChunks();
+            if (chunks.length > 0) {
+              const audioBlob = new Blob(chunks, { type: 'audio/webm' });
+              const duration = audioManager.getDuration();
+              
+              pendingChunkRef.current = audioBlob;
+              pendingChunkTimestampRef.current = Date.now();
+              pendingChunkDurationRef.current = duration;
+              
+              // Set a timer to actually send if speech doesn't resume
+              resumeWindowTimerRef.current = window.setTimeout(() => {
+                if (pendingChunkRef.current && pendingChunkTimestampRef.current) {
+                  processPendingChunk();
+                }
+                resumeWindowTimerRef.current = null;
+              }, VOICE_CONFIG.RESUME_WINDOW);
+            }
+            
             stopRecording();
             silenceTimerRef.current = null;
-          }, VAD_CONFIG.SILENCE_DURATION);
+          }, VOICE_CONFIG.SILENCE_DURATION);
         }
       }
+    } catch (error) {
+      console.error('VAD check error:', error);
+    }
 
-      vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
-    };
-
-    checkVoice();
+    vadAnimationFrameRef.current = requestAnimationFrame(checkVoice);
   };
+
+  checkVoice();
+};
 
   // ==================== Chunk Processing ====================
 
-  const processChunk = async () => {
-    if (isProcessingRef.current || chunkBufferRef.current.length === 0) return;
+  const processPendingChunk = async () => {
+    if (!pendingChunkRef.current) return;
     
-    isProcessingRef.current = true;
-    const chunks = [...chunkBufferRef.current];
-    chunkBufferRef.current = [];
-
-    // Check minimum duration
-    const duration = recordingStartTimeRef.current 
-      ? Date.now() - recordingStartTimeRef.current 
-      : 0;
-
-    if (duration < VAD_CONFIG.MIN_CHUNK_DURATION) {
-      isProcessingRef.current = false;
-      if (isActiveRef.current) startRecording();
+    const audioManager = audioManagerRef.current;
+    if (!audioManager || audioManager.isProcessing()) {
       return;
     }
 
-    try {
-      const audioBlob = new Blob(chunks, { 
-        type: mediaRecorderRef.current?.mimeType || 'audio/webm' 
-      });
+    // Check duration from stored value (recording has stopped by now)
+    const duration = pendingChunkDurationRef.current || 0;
+    if (duration < VOICE_CONFIG.MIN_CHUNK_DURATION) {
+      pendingChunkRef.current = null;
+      pendingChunkTimestampRef.current = null;
+      pendingChunkDurationRef.current = null;
+      return;
+    }
 
-      const audioFile = new File([audioBlob], `chunk_${Date.now()}.webm`, {
-        type: audioBlob.type || 'audio/webm',
-      });
+    audioManager.setProcessing(true);
+
+    try {
+      const audioFile = new File(
+        [pendingChunkRef.current], 
+        `chunk_${Date.now()}.webm`,
+        { type: 'audio/webm' }
+      );
 
       const response = await submitUnified({
         channel,
@@ -256,18 +291,70 @@ export const VoiceMode = ({
 
       onChunkProcessed?.(response);
 
-      if (isActiveRef.current) {
-        startRecording();
+      if (vadRef.current) {
+        vadRef.current.reset();
       }
     } catch (error) {
       console.error('Error processing chunk:', error);
       onError?.(error instanceof Error ? error.message : 'Failed to process audio chunk');
-      
-      if (isActiveRef.current) {
-        startRecording();
-      }
     } finally {
-      isProcessingRef.current = false;
+      audioManager.setProcessing(false);
+      pendingChunkRef.current = null;
+      pendingChunkTimestampRef.current = null;
+      pendingChunkDurationRef.current = null;
+      if (!isActiveRef.current) {
+        cleanup();
+      }
+    }
+  };
+
+  const processChunk = async (forceProcess = false) => {
+    const audioManager = audioManagerRef.current;
+    if (!audioManager || audioManager.isProcessing()) {
+      return;
+    }
+  
+    const chunks = audioManager.getChunks();
+    if (chunks.length === 0) {
+      return;
+    }
+  
+    const duration = audioManager.getDuration();
+    if (!forceProcess && duration < VOICE_CONFIG.MIN_CHUNK_DURATION) {
+      audioManager.clearChunks();
+      return;
+    }
+  
+    audioManager.setProcessing(true);
+  
+    try {
+      const audioFile = audioManager.createAudioFile(`chunk_${Date.now()}.webm`);
+      if (!audioFile) {
+        throw new Error('Failed to create audio file');
+      }
+  
+      const response = await submitUnified({
+        channel,
+        audio: audioFile,
+        user_id,
+        session_id,
+      });
+  
+      onChunkProcessed?.(response);
+  
+      if (vadRef.current) {
+        vadRef.current.reset();
+      }
+      audioManager.clearChunks();
+    } catch (error) {
+      console.error('Error processing chunk:', error);
+      onError?.(error instanceof Error ? error.message : 'Failed to process audio chunk');
+      audioManager.clearChunks();
+    } finally {
+      audioManager.setProcessing(false);
+      if (!isActiveRef.current) {
+        cleanup();
+      }
     }
   };
 
@@ -275,45 +362,37 @@ export const VoiceMode = ({
 
   const startVoiceMode = async () => {
     try {
-      // Get microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      // Setup audio context and analyser
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioContextRef.current = audioContext;
+      // Initialize audio manager
+      const audioManager = new AudioManager({
+        timeslice: 100,
+        fftSize: 2048,
+        smoothing: 0.3,
+      });
       
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = VAD_CONFIG.FFT_SIZE;
-      analyser.smoothingTimeConstant = VAD_CONFIG.SMOOTHING;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      // Load Silero VAD if enabled
-      if (VAD_CONFIG.USE_SILERO) {
-        try {
-          await sileroVAD.loadModel();
-          sileroProcessorRef.current = sileroVAD.createStreamProcessor(audioContext, source);
-          vadModelLoadedRef.current = true;
-          console.log('Silero VAD ready');
-        } catch (error) {
-          console.error('Silero VAD failed, using fallback:', error);
-          vadModelLoadedRef.current = false;
-          onError?.('VAD model failed, using basic detection');
-        }
-      }
-
-      // Start monitoring
+      const resources = await audioManager.initialize();
+      audioManagerRef.current = audioManager;
+  
+      // Initialize VAD
+      const vad = createDefaultVAD(VADEngineType.SILERO);
+      await vad.load();
+      vadRef.current = vad;
+  
+      // Create stream processor
+      vadProcessorRef.current = vad.createStreamProcessor(resources.audioContext, resources.source);
+  
+      vad.reset();
+  
       isActiveRef.current = true;
       setIsActive(true);
       setIsListening(false);
+      
       monitorVoiceActivity();
     } catch (error) {
       console.error('Failed to start voice mode:', error);
       onError?.('Failed to access microphone. Please check permissions.');
       isActiveRef.current = false;
       setIsActive(false);
+      cleanup();
     }
   };
 
@@ -327,27 +406,63 @@ export const VoiceMode = ({
       silenceTimerRef.current = null;
     }
 
+    if (resumeWindowTimerRef.current) {
+      clearTimeout(resumeWindowTimerRef.current);
+      resumeWindowTimerRef.current = null;
+    }
+
     if (vadAnimationFrameRef.current) {
       cancelAnimationFrame(vadAnimationFrameRef.current);
       vadAnimationFrameRef.current = null;
     }
 
-    // Process remaining recording
-    if (isRecordingRef.current && mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
-    } else if (chunkBufferRef.current.length > 0) {
-      processChunk();
+    // Process remaining recording if any
+    // Note: onStop callback will trigger processChunk, which will cleanup if not active
+    const audioManager = audioManagerRef.current;
+    if (audioManager?.isRecording()) {
+      // Set temporary flag so processChunk runs even though we're stopping
+      const wasProcessing = audioManager.isProcessing();
+      if (!wasProcessing) {
+        audioManager.stopRecording();
+        // processChunk will be called via onStop callback and handle cleanup
+        return;
+      }
     }
 
-    // Cleanup resources
-    streamRef.current?.getTracks().forEach(track => track.stop());
-    streamRef.current = null;
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
+    // Process any pending chunk before cleanup
+    if (pendingChunkRef.current) {
+      processPendingChunk();
+      return;
+    }
 
+    cleanup();
+  };
+
+  const cleanup = () => {
+    // Clear pending chunk timers
+    if (resumeWindowTimerRef.current) {
+      clearTimeout(resumeWindowTimerRef.current);
+      resumeWindowTimerRef.current = null;
+    }
+
+    // Cleanup pending chunks
+    pendingChunkRef.current = null;
+    pendingChunkTimestampRef.current = null;
+    pendingChunkDurationRef.current = null;
+
+    // Cleanup resources
+    if (vadRef.current) {
+      vadRef.current.dispose();
+      vadRef.current = null;
+    }
+
+    if (audioManagerRef.current) {
+      audioManagerRef.current.dispose();
+      audioManagerRef.current = null;
+    }
+
+    vadProcessorRef.current = null;
     setIsListening(false);
-    chunkBufferRef.current = [];
-    isRecordingRef.current = false;
   };
 
   const toggleVoiceMode = () => {

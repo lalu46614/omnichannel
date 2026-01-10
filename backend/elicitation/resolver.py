@@ -198,7 +198,11 @@ Now analyze the input using this framework.
             for cluster in clusters[:3]:  # Top 3 clusters
                 cluster_texts = []
                 for item in cluster.get('items', [])[:2]:  # First 2 items per cluster
-                    if 'text_preview' in item:
+                    # CRITICAL FIX: Use normalized_text (full text) instead of text_preview (truncated)
+                    if 'normalized_text' in item:
+                        cluster_texts.append(item['normalized_text'])
+                    elif 'text_preview' in item:
+                        # Fallback to text_preview for backward compatibility
                         cluster_texts.append(item['text_preview'])
                 if cluster_texts:
                     context_parts.append(f"- {' | '.join(cluster_texts)}")

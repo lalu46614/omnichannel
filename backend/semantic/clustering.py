@@ -85,7 +85,8 @@ async def cluster_inputs_advanced(inputs: List[InputItem], threshold: float = 0.
             'items': [
                 {
                     'input_type': item.input_type,
-                    'text_preview': item.normalized_text[:100] + '...' if len(item.normalized_text) > 100 else item.normalized_text,
+                    'text_preview': item.normalized_text,  # CRITICAL FIX: Show full text in preview (was truncated to 100 chars)
+                    'normalized_text': item.normalized_text,  # Store full text for LLM processing
                     'original_data': item.original_data
                 }
                 for item in cluster
@@ -124,8 +125,9 @@ async def cluster_inputs_with_history(
     
     for cluster in previous_clusters:
         # Get representative text from cluster (first item or combined)
+        # CRITICAL FIX: Use normalized_text (full text) instead of text_preview (truncated)
         cluster_text = " ".join([
-            item.get('text_preview', '') 
+            item.get('normalized_text', item.get('text_preview', ''))
             for item in cluster.get('items', [])
         ])
         existing_cluster_texts.append(cluster_text)
@@ -163,7 +165,8 @@ async def cluster_inputs_with_history(
             for idx, item in matched_items:
                 updated_cluster['items'].append({
                     'input_type': item.input_type,
-                    'text_preview': item.normalized_text[:100] + '...' if len(item.normalized_text) > 100 else item.normalized_text,
+                    'text_preview': item.normalized_text,  # CRITICAL FIX: Show full text in preview (was truncated to 100 chars)
+                    'normalized_text': item.normalized_text,  # Store full text for LLM processing
                     'original_data': item.original_data
                 })
             updated_cluster['item_count'] = len(updated_cluster['items'])

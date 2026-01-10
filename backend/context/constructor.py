@@ -117,7 +117,11 @@ class ContextEnvelopeConstructor:
         cluster_texts = []
         
         for cluster_item in cluster.get('items', []):
-            if 'text_preview' in cluster_item:
+            # CRITICAL FIX: Use normalized_text (full text) instead of text_preview (truncated)
+            if 'normalized_text' in cluster_item:
+                cluster_texts.append(cluster_item['normalized_text'])
+            elif 'text_preview' in cluster_item:
+                # Fallback to text_preview for backward compatibility
                 cluster_texts.append(cluster_item['text_preview'])
             elif 'original_data' in cluster_item:
                 gw_output = cluster_item['original_data'].get('gateway_output', {})

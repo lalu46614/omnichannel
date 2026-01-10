@@ -114,14 +114,23 @@ async def input_unified(
 
     for cluster in resolved_clusters:
         # Extract text directly from cluster items (includes previous requests)
+        # CRITICAL FIX: Use normalized_text (full text) instead of text_preview (truncated to 100 chars)
         cluster_texts = []
         for cluster_item in cluster.get('items', []):
-            if 'text_preview' in cluster_item:
-                cluster_texts.append(cluster_item['text_preview'])
+            # Prefer normalized_text (full text) over text_preview (truncated)
+            if 'normalized_text' in cluster_item:
+                cluster_texts.append(cluster_item['normalized_text'])
             elif 'original_data' in cluster_item and 'gateway_output' in cluster_item['original_data']:
+                # Try to get raw_text from gateway_output if available
                 gw_output = cluster_item['original_data']['gateway_output']
-                if 'raw_text' in gw_output:
+                if 'raw_text' in gw_output and gw_output['raw_text']:
                     cluster_texts.append(gw_output['raw_text'])
+                # If no raw_text, fall back to text_preview as last resort
+                elif 'text_preview' in cluster_item:
+                    cluster_texts.append(cluster_item['text_preview'])
+            elif 'text_preview' in cluster_item:
+                # Last resort: use preview (now contains full text after fix)
+                cluster_texts.append(cluster_item['text_preview'])
         
         combined_text = "\n\n".join(cluster_texts) if cluster_texts else ""
         
