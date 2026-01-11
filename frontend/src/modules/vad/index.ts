@@ -11,10 +11,10 @@ export { SileroVADEngine } from './sileroVAD';
 
 export const DEFAULT_VAD_CONFIG: 
 VADConfig = {
-  onsetThreshold: 0.4,      // 0.4-0.5: Lowered to detect speech onset more reliably
-  offsetThreshold: 0.3,     // 0.25-0.35: Lower ensures soft endings aren't cut off
-  minEnergyThreshold: 0.01, // Lowered from 0.02 to catch quieter speech
-  smoothingWindow: 5,       // Smooth over 5 frames
+  onsetThreshold: 0.65,      // 0.4-0.5: Lowered to detect speech onset more reliably
+  offsetThreshold: 0.4,     // 0.3-0.5: Lower ensures soft endings aren't cut off
+  minEnergyThreshold: 0.03, // Lowered to catch quieter speech
+  smoothingWindow: 8,       // Smooth over 8 frames
   checkInterval: 100,       // Check every 100ms
 };
 

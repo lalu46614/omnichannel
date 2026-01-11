@@ -17,7 +17,7 @@ const VOICE_CONFIG = {
   SILENCE_DURATION: 3500,      // 3.5 seconds - allow for natural speech pauses (was 2000ms)
   MIN_CHUNK_DURATION: 3000,    // Minimum 1s recording (filters noise, was 3000ms)
   VAD_CHECK_INTERVAL: 100,     // Check VAD every 100ms
-  RECORDING_COOLDOWN: 500,     // 500ms cooldown between recordings
+  RECORDING_COOLDOWN: 300,     // 300ms cooldown between recordings
   RESUME_WINDOW: 3000,         // 3s window to resume recording after silence
 } as const;
 
