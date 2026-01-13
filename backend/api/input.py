@@ -163,7 +163,7 @@ async def input_unified(
         
         combined_text = "\n\n".join(cluster_texts) if cluster_texts else ""
         
-        llm_response = await call_llm(combined_text, context_envelope.model_dump())
+        llm_response = await call_llm(combined_text, context_envelope.model_dump(),user_sentiment=user_sentiment)
         
         # Inject disfluencies based on sentiment
         if user_sentiment and user_sentiment.get('sentiment') == 'excited':
