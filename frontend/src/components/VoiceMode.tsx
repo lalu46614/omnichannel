@@ -4,6 +4,7 @@ import { submitUnified, generateTtsAudio } from '../services/api';
 import { createDefaultVAD, VADEngineType, BaseVADEngine } from '../modules/vad';
 import { AudioManager } from '../modules/audio';
 import { playAudioBlob } from '../services/audioPlayer';
+import { getProsodyFromSentiment } from '../services/ttsEnhancer';
 
 interface VoiceModeProps {
   channel: string;
@@ -15,7 +16,7 @@ interface VoiceModeProps {
 
 // Configuration - Fixed values
 const VOICE_CONFIG = {
-  SILENCE_DURATION: 3500,      // 3.5 seconds - allow for natural speech pauses (was 2000ms)
+  SILENCE_DURATION: 2500,      // 3.5 seconds - allow for natural speech pauses (was 2000ms)
   MIN_CHUNK_DURATION: 3000,    // Minimum 1s recording (filters noise, was 3000ms)
   VAD_CHECK_INTERVAL: 100,     // Check VAD every 100ms
   RECORDING_COOLDOWN: 300,     // 300ms cooldown between recordings
@@ -281,13 +282,33 @@ const monitorVoiceActivity = () => {
       const text = getPrimaryResponseText(response);
       if (!text) return;
 
-      const audioBlob = await generateTtsAudio(text);
+      // DEBUG: Log full response structure
+      console.log('=== FULL RESPONSE DEBUG ===');
+      console.log('Response keys:', Object.keys(response));
+      console.log('Top-level sentiment:', response.sentiment);
+      console.log('Responses array:', response.responses);
+      if (response.responses && response.responses.length > 0) {
+        console.log('First response:', response.responses[0]);
+        console.log('First response sentiment:', response.responses[0]?.sentiment);
+      }
+      console.log('===========================');
+
+      // Get sentiment data from response
+      const sentiment = response.sentiment || response.responses?.[0]?.sentiment;
+      
+      // Calculate prosody settings
+      const prosodySettings = sentiment 
+        ? getProsodyFromSentiment(sentiment)
+        : undefined;
+      
+      console.log("sentiment", sentiment);
+      console.log('prosodySettings', prosodySettings);
+
+      const audioBlob = await generateTtsAudio(text, prosodySettings);
       await playAudioBlob(audioBlob);
     } catch (err) {
       console.error('TTS playback failed:', err);
-      const message =
-        err instanceof Error ? err.message : 'Failed to play TTS audio';
-      onError?.(message);
+      onError?.(err instanceof Error ? err.message : 'Failed to play TTS audio');
     }
   };
 

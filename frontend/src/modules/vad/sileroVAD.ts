@@ -21,7 +21,7 @@ export class SileroVADEngine extends BaseVADEngine {
   // Probability smoothing and state tracking
   private probabilityHistory: number[] = [];
   private previousResult: VADResult | null = null;
-
+  
   constructor(config: VADConfig) {
     super(config);
   }

@@ -32,6 +32,13 @@ async def call_llm(prompt: str, context_envelope: Optional[Dict[str, Any]] = Non
 def _format_context(envelope: Dict[str, Any]) -> str:
     """Format context envelope into system prompt."""
     parts = []
+
+    parts.append("=== RESPONSE GUIDELINES ===")
+    parts.append("Keep responses SHORT and CONVERSATIONAL (2-4 sentences maximum).")
+    parts.append("Speak naturally, as if having a casual conversation.")
+    parts.append("Avoid long paragraphs or essay-style responses.")
+    parts.append("Be concise and to the point.")
+    parts.append("")
     
     # Conversation History
     if envelope.get('conversation_history'):

@@ -107,6 +107,17 @@ class InMemoryHistoryStore:
     def get_all_sessions(self) -> List[str]:
         
         return list(self._sessions.keys())
+        
+
+    def add_paralinguistic_tags(
+        self, 
+        session_id: str, 
+        input_id: str,
+        tags: Dict[str, any]
+    ):
+        """Store tone, pitch, sentiment tags with input"""
+        # tags: {tone, pitch_trend, sentiment, etc.}
+        # Store alongside input history
 
 # Global singleton instance
 history_store = InMemoryHistoryStore()

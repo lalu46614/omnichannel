@@ -1,5 +1,7 @@
 import axios from 'axios';
 import type { ApiResponse, SubmitTextParams, SubmitFileParams } from '../types';
+import type { ProsodySettings } from './ttsEnhancer';
+import { preprocessTextForTts } from './ttsEnhancer';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -98,8 +100,12 @@ export const submitDocument = async (params: SubmitFileParams): Promise<ApiRespo
 /**
  * ElevenLabs TTS helper
  * Returns an audio Blob (e.g. audio/mpeg) for the given text.
+ * Supports optional prosody settings for enhanced voice modulation.
  */
-export const generateTtsAudio = async (text: string): Promise<Blob> => {
+export const generateTtsAudio = async (
+  text: string,
+  prosodySettings?: ProsodySettings
+): Promise<Blob> => {
   const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
   const voiceId =
     (import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined) ??
@@ -110,6 +116,8 @@ export const generateTtsAudio = async (text: string): Promise<Blob> => {
   }
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+  
+  const processedText = preprocessTextForTts(text);
 
   const response = await fetch(url, {
     method: 'POST',
@@ -119,12 +127,19 @@ export const generateTtsAudio = async (text: string): Promise<Blob> => {
       Accept: 'audio/mpeg',
     },
     body: JSON.stringify({
-      text,
+      text: processedText,
       model_id: 'eleven_flash_v2',
       voice_settings: {
-        stability: 0.5,
+        stability: prosodySettings?.stability ?? 0.5,
         similarity_boost: 0.75,
+        ...(prosodySettings?.style && { style: 0.5 }),
+        use_speaker_boost: true,
       },
+      // Add prosody parameters if supported by ElevenLabs API
+      ...(prosodySettings && {
+        ...(prosodySettings.speed !== undefined && { speed: prosodySettings.speed }),
+        ...(prosodySettings.pitch !== undefined && { pitch: prosodySettings.pitch }),
+      }),
     }),
   });
 
@@ -134,4 +149,5 @@ export const generateTtsAudio = async (text: string): Promise<Blob> => {
 
   return await response.blob();
 };
+
 

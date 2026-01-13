@@ -11,12 +11,15 @@ from resolvers.input_type import detect_input_type
 from storage.disk import save_file
 from normalisation.dispatcher import normalize_input
 from llm.groq_client import call_llm
-from semantic.clustering import InputItem, cluster_inputs_advanced
+from semantic.clustering import InputItem
 from context.constructor import ContextEnvelopeConstructor
 from elicitation.resolver import ElicitationResolver
 from history.memory_store import history_store
+from sentiment.analyzer import analyze_sentiment_and_tone
+from tts.disfluency import inject_disfluencies
 
 router = APIRouter(prefix="/input", tags=["Input Gateway"])
+
 @router.post("/unified")
 async def input_unified(
     text: Optional[str] = Form(None),
@@ -110,6 +113,32 @@ async def input_unified(
     constructor = ContextEnvelopeConstructor()
 
     context_envelope = await constructor.construct_envelope(input_items=input_items,clusters=resolved_clusters,metadata=metadata,input_id=input_id)
+    
+    # Analyze sentiment and tone BEFORE generating responses
+    user_sentiment = None
+    if text:
+        user_sentiment = await analyze_sentiment_and_tone(text)
+        print("user_sentiment from text:", user_sentiment);
+    elif audio:
+        # Extract transcribed text from normalized_text for sentiment analysis
+        # The normalized_text should contain the transcription from audio
+        for item in input_items:
+            if item.input_type == "audio" and item.normalized_text:
+                print("analysing user_sentiment from audio transcription:", item.normalized_text[:100]);
+                user_sentiment = await analyze_sentiment_and_tone(item.normalized_text)
+                print("user_sentiment from audio:", user_sentiment);
+                break
+    elif document:
+        # For documents, analyze the extracted text
+        for item in input_items:
+            if item.input_type == "document" and item.normalized_text:
+                # Use first 500 chars for sentiment analysis (documents can be long)
+                text_sample = item.normalized_text[:500]
+                user_sentiment = await analyze_sentiment_and_tone(text_sample)
+                break
+
+    print("final user_sentiment:", user_sentiment);
+
     all_responses = []
 
     for cluster in resolved_clusters:
@@ -134,14 +163,22 @@ async def input_unified(
         
         combined_text = "\n\n".join(cluster_texts) if cluster_texts else ""
         
-        llm_response = await call_llm(combined_text,context_envelope.model_dump())
+        llm_response = await call_llm(combined_text, context_envelope.model_dump())
+        
+        # Inject disfluencies based on sentiment
+        if user_sentiment and user_sentiment.get('sentiment') == 'excited':
+            llm_response = inject_disfluencies(llm_response, intensity=0.7)
+        else:
+            llm_response = inject_disfluencies(llm_response, intensity=0.5)
         
         all_responses.append({
             "bucket_id": cluster['bucket_id'],
             "input_types": cluster['input_types'],
             "item_count": cluster['item_count'],
-            "llm_response": llm_response
+            "llm_response": llm_response,
+            "sentiment": user_sentiment  # Include sentiment data for frontend
         })
+    
     if session_id:
         # Store input
         history_store.add_input(
@@ -167,67 +204,14 @@ async def input_unified(
                     "timestamp": datetime.now().isoformat()
                 }
             )
+    
     return {
         "input_id": input_id,
         "clusters": resolved_clusters,  # Metadata about clusters
         "responses": all_responses,  # LLM responses per cluster
         "total_clusters": len(resolved_clusters),
-        "context_envelope": context_envelope.model_dump()  # Serialize Pydantic model to dict
+        "context_envelope": context_envelope.model_dump(),  # Serialize Pydantic model to dict
+        "sentiment": user_sentiment  # Include sentiment at top level for easy access
     }
 
     
-# TEXT
-@router.post("/text")
-async def input_text(text: str = Form(...), channel: str = Form(...), user_id: Optional[UUID] = Form(None), session_id: Optional[UUID] = Form(None)):
-    validate_text_payload(text)
-
-    input_id = str(uuid4())
-    content_type = "text/plain"
-    input_type = detect_input_type(content_type)
-    raw_payload_ref = "inline"
-    metadata = add_metadata(channel=channel, user_id=user_id, session_id=session_id)
-
-    gateway_output = GatewayOutput(input_id=input_id, input_type=input_type, raw_payload_ref=raw_payload_ref, content_type=content_type, metadata=metadata, raw_text=text)
-    normalize_text = await normalize_input(gateway_output)
-    llm_response = await call_llm(normalize_text)
-    return {
-        "input_id": input_id,
-        "llm_response": llm_response
-    }
-
-# AUDIO
-@router.post("/audio")
-async def input_audio(audio: UploadFile = File(...), channel: str = Form(...), user_id: Optional[UUID] = Form(None), session_id: Optional[UUID] = Form(None)):
-    validate_audio_file(audio)
-
-    input_id = str(uuid4())
-    input_type = detect_input_type(audio.content_type)
-    raw_payload_ref = await save_file(audio, input_id=input_id, category="audio")
-    metadata = add_metadata(channel=channel, user_id=user_id, session_id=session_id)
-
-    gateway_output = GatewayOutput(input_id=input_id, input_type=input_type, raw_payload_ref=raw_payload_ref, content_type=audio.content_type, metadata=metadata)
-    normalize_text = await normalize_input(gateway_output)
-    llm_response = await call_llm(normalize_text)
-    return {
-        "input_id": input_id,
-        "llm_response": llm_response
-    }
-
-# DOCUMENT
-@router.post("/document")
-async def input_document(document: UploadFile = File(...), channel: str = Form(...), user_id: Optional[UUID] = Form(None), session_id: Optional[UUID] = Form(None)):
-    validate_document_file(document)
-
-    input_id = str(uuid4())
-    input_type = detect_input_type(document.content_type)
-    raw_payload_ref = await save_file(document, input_id=input_id, category="document")
-    metadata = add_metadata(channel=channel, user_id=user_id, session_id=session_id)
-
-    gateway_output = GatewayOutput(input_id=input_id, input_type=input_type, raw_payload_ref=raw_payload_ref, content_type=document.content_type, metadata=metadata)
-    normalize_text = await normalize_input(gateway_output)
-    llm_response = await call_llm(normalize_text)
-    return {
-        "input_id": input_id,
-        "llm_response": llm_response
-    }
-
