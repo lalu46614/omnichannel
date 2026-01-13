@@ -4,7 +4,8 @@ import { AttachmentButton, FilePreview } from './AttachmentButton';
 import { AudioRecorder } from './AudioRecorder';
 
 import { SendIcon } from './Icons';
-import { submitUnified } from '../services/api';
+import { submitUnified, generateTtsAudio } from '../services/api';
+import { playAudioBlob } from '../services/audioPlayer';
 
 
 
@@ -80,11 +81,47 @@ export const UnifiedInput = ({
         session_id,
       });
   
+      // Trigger TTS only when this submission included audio
+      if (hasAudio) {
+        try {
+          let textForTts: string | null = null;
+
+          if (Array.isArray(response.responses) && response.responses.length > 0) {
+            // Take the LAST response (most recently generated) instead of first
+            const lastResponse = response.responses[response.responses.length - 1];
+            if (lastResponse && typeof lastResponse.llm_response === 'string') {
+              textForTts = lastResponse.llm_response;
+            } else {
+              // Fallback to first if last doesn't have text
+              const first = response.responses[0];
+              if (first && typeof first.llm_response === 'string') {
+                textForTts = first.llm_response;
+              }
+            }
+          } else if (Array.isArray(response.responses) && response.responses.length > 0) {
+            const lastResponse = response.responses[response.responses.length - 1];
+            if (lastResponse && typeof lastResponse.llm_response === 'string') {
+              textForTts = lastResponse.llm_response;
+            }
+          }
+
+          if (textForTts) {
+            const ttsBlob = await generateTtsAudio(textForTts);
+            await playAudioBlob(ttsBlob);
+          }
+        } catch (err) {
+          console.error('TTS playback failed:', err);
+          const msg =
+            err instanceof Error ? err.message : 'Failed to play TTS audio';
+          onError?.(msg);
+        }
+      }
+
       // Reset form
       setText('');
       setSelectedFile(null);
       setAudioBlob(null);
-  
+
       // Pass the full response with clusters
       onResponse?.(response);
     } catch (error) {

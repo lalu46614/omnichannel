@@ -6,6 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
 const api = axios.create({
   baseURL: API_BASE_URL,
 });
+
 export const submitUnified = async (params: {
   channel: string;
   text?: string;
@@ -92,5 +93,45 @@ export const submitDocument = async (params: SubmitFileParams): Promise<ApiRespo
 
   const response = await api.post<ApiResponse>('/input/document', formData);
   return response.data;
+};
+
+/**
+ * ElevenLabs TTS helper
+ * Returns an audio Blob (e.g. audio/mpeg) for the given text.
+ */
+export const generateTtsAudio = async (text: string): Promise<Blob> => {
+  const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
+  const voiceId =
+    (import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined) ??
+    'EXAVITQu4vr4xnSDxMaL'; // Default voice ID (can be overridden via env)
+
+  if (!apiKey) {
+    throw new Error('Missing ElevenLabs API key. Set VITE_ELEVENLABS_API_KEY in your environment.');
+  }
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+      Accept: 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_flash_v2',
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.75,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`ElevenLabs TTS failed with status ${response.status}`);
+  }
+
+  return await response.blob();
 };
 

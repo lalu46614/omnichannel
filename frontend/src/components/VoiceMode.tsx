@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { MicrophoneIcon } from './Icons';
-import { submitUnified } from '../services/api';
+import { submitUnified, generateTtsAudio } from '../services/api';
 import { createDefaultVAD, VADEngineType, BaseVADEngine } from '../modules/vad';
 import { AudioManager } from '../modules/audio';
+import { playAudioBlob } from '../services/audioPlayer';
 
 interface VoiceModeProps {
   channel: string;
@@ -254,6 +255,42 @@ const monitorVoiceActivity = () => {
   checkVoice();
 };
 
+  // ==================== Helpers ====================
+
+  const getPrimaryResponseText = (response: any): string | null => {
+    if (!response) return null;
+
+    // Prefer the first LLM response text if available
+    if (Array.isArray(response.responses) && response.responses.length > 0) {
+      const lastResponse = response.responses[response.responses.length - 1];
+      if (lastResponse && typeof lastResponse.llm_response === 'string') {
+        return lastResponse.llm_response;
+      }
+    }
+
+    // Fallbacks
+    if (typeof response.llm_response === 'string') {
+      return response.llm_response;
+    }
+
+    return null;
+  };
+
+  const speakResponseIfAvailable = async (response: any) => {
+    try {
+      const text = getPrimaryResponseText(response);
+      if (!text) return;
+
+      const audioBlob = await generateTtsAudio(text);
+      await playAudioBlob(audioBlob);
+    } catch (err) {
+      console.error('TTS playback failed:', err);
+      const message =
+        err instanceof Error ? err.message : 'Failed to play TTS audio';
+      onError?.(message);
+    }
+  };
+
   // ==================== Chunk Processing ====================
 
   const processPendingChunk = async () => {
@@ -290,6 +327,8 @@ const monitorVoiceActivity = () => {
       });
 
       onChunkProcessed?.(response);
+      // VoiceMode always sends audio, so we always treat this as voice-originated
+      speakResponseIfAvailable(response);
 
       if (vadRef.current) {
         vadRef.current.reset();
@@ -341,6 +380,8 @@ const monitorVoiceActivity = () => {
       });
   
       onChunkProcessed?.(response);
+      // VoiceMode always sends audio, so we always treat this as voice-originated
+      speakResponseIfAvailable(response);
   
       if (vadRef.current) {
         vadRef.current.reset();
