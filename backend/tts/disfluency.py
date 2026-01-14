@@ -65,7 +65,7 @@ def inject_disfluencies(text: str, intensity: float = 0.3) -> str:
         
         if is_sentence:
             # 1. Add disfluency at START of sentence
-            if random.random() < intensity * 0.4:  # 40% of intensity for sentence start
+            if random.random() < intensity * 0.3:  # 30% of intensity for sentence start
                 disfluency = random.choice(DISFLUENCY_PATTERNS)
                 result.append(f"{disfluency}, ")
             
@@ -95,7 +95,7 @@ def _add_mid_sentence_disfluencies(sentence: str, intensity: float) -> str:
     
     # Probability of adding disfluency after each word (except last 2 words)
     # With intensity=0.5, about 15% chance per word position
-    disfluency_probability = intensity * 0.3
+    disfluency_probability = intensity * 0.25
     
     for i, word in enumerate(words):
         result.append(word)
@@ -115,7 +115,7 @@ def _add_self_corrections(sentence: str, intensity: float) -> str:
     Add self-correction patterns like "I think... actually, I know" for natural speech.
     """
     # Probability of self-correction
-    correction_probability = intensity * 0.2  # Lower probability than disfluencies
+    correction_probability = intensity * 0.15  # Lower probability than disfluencies
     
     if random.random() > correction_probability:
         return sentence
