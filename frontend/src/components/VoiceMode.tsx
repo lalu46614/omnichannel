@@ -16,11 +16,11 @@ interface VoiceModeProps {
 
 // Configuration - Fixed values
 const VOICE_CONFIG = {
-  SILENCE_DURATION: 2500,      // 3.5 seconds - allow for natural speech pauses (was 2000ms)
+  SILENCE_DURATION: 2500,      // 2.5 seconds - allow for natural speech pauses (was 2000ms)
   MIN_CHUNK_DURATION: 3000,    // Minimum 1s recording (filters noise, was 3000ms)
   VAD_CHECK_INTERVAL: 100,     // Check VAD every 100ms
   RECORDING_COOLDOWN: 300,     // 300ms cooldown between recordings
-  RESUME_WINDOW: 3000,         // 3s window to resume recording after silence
+  RESUME_WINDOW: 2000,         // 2s window to resume recording after silence
 } as const;
 
 const BUTTON_STYLES = {
@@ -258,29 +258,45 @@ const monitorVoiceActivity = () => {
 
   // ==================== Helpers ====================
 
-  const getPrimaryResponseText = (response: any): string | null => {
+  const getPrimaryResponse = (
+    response: any
+  ): { text: string; sentiment?: any } | null => {
     if (!response) return null;
 
-    // Prefer the first LLM response text if available
-    if (Array.isArray(response.responses) && response.responses.length > 0) {
-      const lastResponse = response.responses[response.responses.length - 1];
-      if (lastResponse && typeof lastResponse.llm_response === 'string') {
-        return lastResponse.llm_response;
-      }
-    }
+    const inputId: string | undefined = response.input_id;
 
-    // Fallbacks
-    if (typeof response.llm_response === 'string') {
-      return response.llm_response;
-    }
+    // Find which bucket contains THIS request's input_id
+    const bucketId =
+      inputId && Array.isArray(response.clusters)
+        ? response.clusters.find((c: any) => {
+            const items = c?.items;
+            if (!Array.isArray(items)) return false;
+            return items.some(
+              (it: any) => it?.original_data?.gateway_output?.input_id === inputId
+            );
+          })?.bucket_id
+        : undefined;
 
-    return null;
+    // Pick the response for that bucket_id (fallback to last one if not found)
+    const picked =
+      (bucketId !== undefined && Array.isArray(response.responses)
+        ? response.responses.find((r: any) => r?.bucket_id === bucketId)
+        : null) ||
+      (Array.isArray(response.responses) && response.responses.length > 0
+        ? response.responses[response.responses.length - 1]
+        : null) ||
+      null;
+
+    const text: unknown = picked?.llm_response ?? response.llm_response;
+    if (typeof text !== 'string' || !text.trim()) return null;
+
+    return { text, sentiment: picked?.sentiment ?? response.sentiment };
   };
 
   const speakResponseIfAvailable = async (response: any) => {
     try {
-      const text = getPrimaryResponseText(response);
-      if (!text) return;
+      const picked = getPrimaryResponse(response);
+      if (!picked) return;
 
       // DEBUG: Log full response structure
       console.log('=== FULL RESPONSE DEBUG ===');
@@ -293,8 +309,8 @@ const monitorVoiceActivity = () => {
       }
       console.log('===========================');
 
-      // Get sentiment data from response
-      const sentiment = response.sentiment || response.responses?.[0]?.sentiment;
+      // Get sentiment data from the picked bucket response (or fall back to top-level)
+      const sentiment = picked.sentiment;
       
       // Calculate prosody settings
       const prosodySettings = sentiment 
@@ -304,7 +320,7 @@ const monitorVoiceActivity = () => {
       console.log("sentiment", sentiment);
       console.log('prosodySettings', prosodySettings);
 
-      const audioBlob = await generateTtsAudio(text, prosodySettings);
+      const audioBlob = await generateTtsAudio(picked.text, prosodySettings);
       await playAudioBlob(audioBlob);
     } catch (err) {
       console.error('TTS playback failed:', err);
@@ -373,11 +389,16 @@ const monitorVoiceActivity = () => {
     if (!audioManager || audioManager.isProcessing()) {
       return;
     }
-  
+
+    if (pendingChunkRef.current) {
+      audioManager.clearChunks();
+      return;
+    }
+
     const chunks = audioManager.getChunks();
     if (chunks.length === 0) {
       return;
-    }
+    }    
   
     const duration = audioManager.getDuration();
     if (!forceProcess && duration < VOICE_CONFIG.MIN_CHUNK_DURATION) {
