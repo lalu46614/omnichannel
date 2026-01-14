@@ -3,7 +3,7 @@ import { MicrophoneIcon } from './Icons';
 import { submitUnified, generateTtsAudio } from '../services/api';
 import { createDefaultVAD, VADEngineType, BaseVADEngine } from '../modules/vad';
 import { AudioManager } from '../modules/audio';
-import { playAudioBlob } from '../services/audioPlayer';
+import { playManagedAudioBlob, stopAudioPlayback } from '../services/audioPlayer';
 import { getProsodyFromSentiment } from '../services/ttsEnhancer';
 
 interface VoiceModeProps {
@@ -83,6 +83,11 @@ export const VoiceMode = ({
   const pendingChunkDurationRef = useRef<number | null>(null);
   const resumeWindowTimerRef = useRef<number | null>(null);
   const consecutiveSilenceCountRef = useRef<number>(0);
+
+  // TTS control for barge-in
+  const ttsAbortRef = useRef<AbortController | null>(null);
+  const ttsSeqRef = useRef(0);
+  const ttsPlayingRef = useRef(false);
 
   useEffect(() => {
     return () => stopVoiceMode();
@@ -164,6 +169,13 @@ const monitorVoiceActivity = () => {
 
       if (hasVoice) {
         setIsListening(true);
+
+        // BARGE-IN: if user starts speaking while TTS is playing, stop it immediately
+        if (ttsPlayingRef.current) {
+          ttsAbortRef.current?.abort(); // cancel in-flight TTS
+          stopAudioPlayback();          // stop current audio
+          ttsPlayingRef.current = false;
+        }
         
         // Check if we should cancel pending chunk send (speech resumed)
         if (pendingChunkRef.current && pendingChunkTimestampRef.current) {
@@ -294,37 +306,50 @@ const monitorVoiceActivity = () => {
   };
 
   const speakResponseIfAvailable = async (response: any) => {
+    const picked = getPrimaryResponse(response);
+    if (!picked) return;
+
+    // Cancel any existing TTS (fetch or playback)
+    ttsAbortRef.current?.abort();
+    stopAudioPlayback();
+
+    const mySeq = ++ttsSeqRef.current;
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+
     try {
-      const picked = getPrimaryResponse(response);
-      if (!picked) return;
-
-      // DEBUG: Log full response structure
-      console.log('=== FULL RESPONSE DEBUG ===');
-      console.log('Response keys:', Object.keys(response));
-      console.log('Top-level sentiment:', response.sentiment);
-      console.log('Responses array:', response.responses);
-      if (response.responses && response.responses.length > 0) {
-        console.log('First response:', response.responses[0]);
-        console.log('First response sentiment:', response.responses[0]?.sentiment);
-      }
-      console.log('===========================');
-
-      // Get sentiment data from the picked bucket response (or fall back to top-level)
       const sentiment = picked.sentiment;
-      
-      // Calculate prosody settings
-      const prosodySettings = sentiment 
+      const prosodySettings = sentiment
         ? getProsodyFromSentiment(sentiment)
         : undefined;
-      
-      console.log("sentiment", sentiment);
-      console.log('prosodySettings', prosodySettings);
 
-      const audioBlob = await generateTtsAudio(picked.text, prosodySettings);
-      await playAudioBlob(audioBlob);
-    } catch (err) {
+      ttsPlayingRef.current = true;
+
+      const audioBlob = await generateTtsAudio(picked.text, prosodySettings, {
+        signal: controller.signal,
+      });
+
+      // If a newer TTS started, skip this one
+      if (mySeq !== ttsSeqRef.current) return;
+
+      await playManagedAudioBlob(audioBlob, {
+        signal: controller.signal,
+        onEnd: () => {
+          ttsPlayingRef.current = false;
+        },
+      });
+    } catch (err: any) {
+      // AbortError is expected on interruption; ignore it
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
+
       console.error('TTS playback failed:', err);
       onError?.(err instanceof Error ? err.message : 'Failed to play TTS audio');
+    } finally {
+      if (mySeq === ttsSeqRef.current) {
+        ttsPlayingRef.current = false;
+      }
     }
   };
 

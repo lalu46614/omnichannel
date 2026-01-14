@@ -104,7 +104,8 @@ export const submitDocument = async (params: SubmitFileParams): Promise<ApiRespo
  */
 export const generateTtsAudio = async (
   text: string,
-  prosodySettings?: ProsodySettings
+  prosodySettings?: ProsodySettings,
+  opts?: { signal?: AbortSignal }
 ): Promise<Blob> => {
   const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
   const voiceId =
@@ -126,6 +127,7 @@ export const generateTtsAudio = async (
       'Content-Type': 'application/json',
       Accept: 'audio/mpeg',
     },
+    signal: opts?.signal,
     body: JSON.stringify({
       text: processedText,
       model_id: 'eleven_flash_v2',

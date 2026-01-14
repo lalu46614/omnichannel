@@ -165,11 +165,15 @@ async def input_unified(
         
         llm_response = await call_llm(combined_text, context_envelope.model_dump(),user_sentiment=user_sentiment)
         
+        input_types = cluster.get('input_types', []) or []
+        has_audio = 'audio' in input_types
+
+        if has_audio:
         # Inject disfluencies based on sentiment
-        if user_sentiment and user_sentiment.get('sentiment') == 'excited':
-            llm_response = inject_disfluencies(llm_response, intensity=0.7)
-        else:
-            llm_response = inject_disfluencies(llm_response, intensity=0.5)
+            if user_sentiment and user_sentiment.get('sentiment') == 'excited':
+                llm_response = inject_disfluencies(llm_response, intensity=0.7)
+            else:
+                llm_response = inject_disfluencies(llm_response, intensity=0.5)
         
         all_responses.append({
             "bucket_id": cluster['bucket_id'],

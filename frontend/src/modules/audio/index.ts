@@ -39,8 +39,14 @@ export class AudioManager {
       };
     }
 
-    // Get microphone access
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Get microphone access with basic echo reduction and noise suppression
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     this.stream = stream;
 
     // Setup audio context and analyser
